@@ -1,0 +1,237 @@
+#+title: org-calsync — external calendars, mirrored into Org
+#+options: toc:2 num:nil
+
+External calendars, mirrored into one Org file you can clock, annotate and
+refile — and mirrored /again/ tomorrow without undoing any of that.
+
+Reading a calendar is not the hard part; Emacs has done that for decades. The
+hard part is reading one repeatedly into a file somebody is also editing. A
+meeting arrives from the source, you clock it, you write a note under it, you
+refile it into a project. The next sync has to find that entry, update only
+what the source owns, and leave the rest alone. Anything less and the file is
+either stale or hostile to work in.
+
+* Three rules
+
+*Identity is the UID.* An entry is matched by its ~:UID:~ wherever it has been
+moved to, across every file in ~org-agenda-files~. A refiled meeting is
+updated in place, not duplicated back into the calendar file.
+
+*Only machine-owned fields are written.* The title, the event timestamp and
+the ~:UID:~ / ~:CATEGORY:~ / ~:LOCATION:~ / ~:FEED:~ properties come from the
+source. TODO state, tags, priority, LOGBOOK and clock lines, SCHEDULED and
+DEADLINE, body notes and sub-headings are yours, and a sync never touches
+them.
+
+*A mirror is pruned, but only where it is still a mirror.* A sync removes
+entries the source no longer has — otherwise cancelled meetings linger forever
+— but only those that carry no sign of your having touched them. An entry with
+a clock, a note, a state change or a child heading survives its own
+cancellation, because by then it is a record of something that happened.
+
+* Install
+
+#+begin_src emacs-lisp
+(use-package org-calsync
+  :straight (org-calsync :host github :repo "yoshzucker/org-calsync"
+                         :files ("*.el" ("script" "script/*")))
+  :after org)
+#+end_src
+
+The ~:files~ line matters twice over: straight's default recipe collects only
+~*.el~, and a bare ~"script/*"~ would map the helpers onto the package root,
+because MELPA's file directive drops the directory part. The nested form keeps
+~script/~ intact. (The adapters fall back to the flattened layout anyway, but a
+recipe that says what it means is easier to trust.)
+
+* Categories and feeds
+
+Two properties that are easy to confuse, and the reason this package exists in
+its current shape:
+
+| Property      | Says                | Seen where                     |
+|---------------+---------------------+--------------------------------|
+| ~:CATEGORY:~  | what a thing /is/   | the agenda's left column       |
+| ~:FEED:~      | which sync owns it  | nowhere; it is bookkeeping     |
+
+Collapsing them — as an earlier version of this code did — has two costs. The
+agenda ends up displaying the name of whatever product the calendar happens to
+live in, which says nothing about the day and ages badly. And a feed can then
+only ever carry one category, so a single source cannot bring in a family
+calendar and a work calendar and have them read differently.
+
+So a feed is a /machine/'s connection to a store, and it may write any number
+of categories. Pruning is per feed.
+
+An entry with no ~:FEED:~ is never pruned — it predates the bookkeeping or was
+written by hand, and nothing here can claim to know it should be gone. The
+first sync after an upgrade adopts everything it can still match by UID. For
+the remainder — entries whose source has already forgotten them, which would
+otherwise sit in the file forever — ~M-x org-calsync-adopt~ hands them to a
+feed, optionally only those carrying one particular ~:CATEGORY:~. Restrict it:
+a one-off ics import also has a UID and no feed, and adopting one into a
+mirroring feed is how it gets pruned away.
+
+* Sources
+
+A source is a function of no arguments returning a list of event plists:
+
+#+begin_src emacs-lisp
+(:uid "..." :title "..." :category "..." :location "..." :timestamp "<2026-08-14 Fri 10:00-11:00>")
+#+end_src
+
+That is the whole interface. ~:category~ and ~:location~ may be nil.
+
+#+begin_src emacs-lisp
+(setq org-calsync-sources
+      '((work    :fetch org-calsync-outlook-fetch :category "meeting")
+        (private :fetch org-calsync-macos-fetch)))
+#+end_src
+
+~:category~ on the feed is a default, applied to events that do not name one
+themselves.
+
+~M-x org-calsync~ syncs a feed (prompting only when there is more than one).
+~M-x org-calsync-import-file~ takes a single ics — the one that arrived by
+mail — and adds or updates without ever pruning: a file somebody sent you is a
+fragment of their calendar, not a statement about what no longer exists.
+
+** ics files
+
+~org-calsync-ics-events~ reads any ics with the ~icalendar~ parser Emacs
+already ships. No network, no extra runtime.
+
+DESCRIPTION is deliberately dropped: a meeting body is usually a wall of
+dial-in boilerplate and somebody else's signature, and an agenda carrying it
+is an agenda nobody reads twice.
+
+An all-day DTEND is exclusive in RFC 5545 and inclusive in Org, so a day is
+taken off it. Getting that backwards is the single most common way an
+imported calendar ends up one day long everywhere.
+
+** Outlook (Windows)
+
+~org-calsync-outlook-fetch~ drives the running Outlook over COM, through
+~script/outlook-export.ps1~.
+
+COM rather than Graph, on purpose: it attaches to the copy of Outlook already
+on the desk, so it needs no application registration, no tenant consent and no
+token, and the calendar never leaves the machine. On a managed laptop that is
+often the difference between something you can use and something you must ask
+for.
+
+The export writes a temporary ics which is read back and then deleted,
+whatever happens — a verbatim copy of a work calendar left in the temp
+directory is the sort of thing that is nobody's problem until it is.
+
+** Calendar.app (macOS)
+
+~org-calsync-macos-fetch~ reads the calendar store through EventKit, using a
+small Swift program in ~script/~ that is compiled on demand into
+~org-calsync-macos-cache-directory~ and rebuilt when its source changes.
+
+The obvious alternative was AppleScript, which needs no toolchain. Measured
+over the same four calendars and thirty-two days it took between 8 and 43
+seconds: every property read crosses a process boundary, so the cost scales
+with events times fields and swings with whatever else Calendar.app is doing.
+Batching the reads — the usual fix — is not available, because a property of a
+materialised list of event specifiers is an error. EventKit answers the same
+question in 40 ms, deterministically, at the cost of a one-off two-second
+compile.
+
+Note also that there is no file to read: the old
+~~/Library/Calendars/*.calendar/Events/*.ics~ layout is gone from modern
+macOS, and what is left under that path on a long-lived machine is a decade of
+~.icbu~ backups.
+
+Calendars are named one at a time rather than taken wholesale:
+
+#+begin_src emacs-lisp
+(setq org-calsync-macos-calendars
+      '(("Personal" . "personal")
+        ("Family"   . "family")))
+#+end_src
+
+A stock macOS carries a weather feed, a holidays feed, birthdays and Siri's
+guesses, and an agenda that shows tomorrow's forecast beside tomorrow's
+meetings is one that stops being read. A name that does not exist is an error
+rather than a silent omission, so a renamed calendar cannot quietly stop
+importing.
+
+*** Why the reader is an app bundle
+
+macOS attributes a privacy request to the /responsible/ process, which for
+anything Emacs spawns is Emacs itself. Emacs.app ships no
+~NSCalendarsUsageDescription~, so the system has no sentence to put in the
+dialog — and a request it cannot phrase is one it refuses outright: no prompt,
+no entry in System Settings, nothing to grant afterwards. Running the very
+same binary from a terminal succeeds, because the terminal was granted access
+once, which makes this look like a bug in the code rather than a rule about
+who is deemed to be asking.
+
+So the reader is compiled into a small app bundle, signed ad-hoc, and started
+with ~open~. Launched that way it is responsible for itself, carries its own
+usage description, and appears in System Settings under its own name where the
+answer can be changed later. It is ~LSUIElement~, so a program that lives for
+40 ms never reaches the Dock.
+
+Emacs.app is left alone. Patching another application's ~Info.plist~ would
+invalidate its signature, drop the permissions it already holds, and be undone
+by its next update.
+
+The first fetch raises the dialog, and ~open~ waits for the answer. A rebuild
+— which happens only when the Swift source changes — re-signs the bundle and
+therefore asks once more.
+
+* Exporting an abstracted calendar
+
+~M-x org-calsync-export-busy~ writes an ics in which every event carries the
+same label and nothing else — no title, no location, no attendees, no notes.
+Times and durations only.
+
+This is the bridge between a work machine and a private one where the detail
+must not cross: subscribe to the result from the other side and the shape of
+the week is visible without any of its content. ~org-calsync-busy-exclude-categories~
+drops events that are already on the receiving calendar under their own names.
+
+Because it is the confidentiality boundary, the VEVENT builder takes only a
+uid, a timestamp, a label and a stamp *as its arguments* — there is nothing
+else in scope for it to leak, by construction rather than by discipline, and
+the tests assert on that.
+
+~org-calsync-busy-compose-function~, when set, is handed the finished file; the
+Outlook adapter provides one that opens a compose window with it attached.
+The mail is displayed, never sent: what leaves the machine, and to whom, stays
+a decision somebody makes by hand.
+
+* Settings
+
+| Variable                            | Default        |
+|-------------------------------------+----------------|
+| ~org-calsync-file-name~             | ~calendar.org~ (under ~org-directory~) |
+| ~org-calsync-feed-property~         | ~"FEED"~       |
+| ~org-calsync-sources~               | nil            |
+| ~org-calsync-outlook-days~ / ~-back~ | 30 / 1        |
+| ~org-calsync-macos-calendars~       | nil            |
+| ~org-calsync-macos-days~ / ~-back~  | 60 / 2         |
+| ~org-calsync-busy-file-name~        | ~busy.ics~     |
+| ~org-calsync-busy-label~            | ~"Busy"~       |
+| ~org-calsync-busy-days~             | 60             |
+| ~org-calsync-busy-exclude-categories~ | nil          |
+
+The ~-back~ settings are more than zero on purpose: a meeting that moved
+earlier this morning is still seen, and updated, rather than left as it was.
+
+* Tests
+
+#+begin_src sh
+emacs --batch -Q -L . -f batch-byte-compile *.el
+emacs --batch -Q -L . -L test -l test/org-calsync-test.el \
+      -f ert-run-tests-batch-and-exit
+#+end_src
+
+The suite covers timestamp conversion in all four shapes (all-day, timed,
+day-crossing, repeating), non-destructive merge, idempotence, feed-scoped
+pruning, following an entry that was refiled elsewhere, and what the busy
+export is allowed to contain. ~osascript~, ~swiftc~ and Outlook are never
+invoked; the adapters are tested against captured output.
