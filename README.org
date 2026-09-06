@@ -222,6 +222,11 @@ a decision somebody makes by hand.
 The ~-back~ settings are more than zero on purpose: a meeting that moved
 earlier this morning is still seen, and updated, rather than left as it was.
 
+~org-calsync-after-sync-hook~ runs once a feed has landed. A sync can
+create the calendar file where there was none, so a configuration that
+builds ~org-agenda-files~ by hand rather than from a directory has
+somewhere to be told.
+
 * Tests
 
 #+begin_src sh

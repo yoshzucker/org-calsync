@@ -409,6 +409,14 @@ Returns (ADDED UPDATED SKIPPED REMOVED)."
 
 ;;;; Syncing a source
 
+(defvar org-calsync-after-sync-hook nil
+  "Hook run after a feed has been synced into the calendar file.
+
+A sync can create the calendar file where there was none, which a
+configuration that builds `org-agenda-files' by hand has to be told
+about.  What that costs -- a rescan of a directory, a cache rebuilt --
+belongs to the configuration, not here.")
+
 ;;;###autoload
 (defun org-calsync (&optional feed)
   "Sync FEED from `org-calsync-sources' into the calendar file.
@@ -436,8 +444,7 @@ one."
                                f))
                            (funcall fetch))))
       (pcase-let ((`(,a ,u ,s ,r) (org-calsync-apply events feed t)))
-        (when (fboundp 'my/org-agenda-files-refresh)
-          (my/org-agenda-files-refresh))
+        (run-hooks 'org-calsync-after-sync-hook)
         (message "%s: +%d ~%d -%d skip %d" feed a u r s)
         (list a u s r)))))
 
