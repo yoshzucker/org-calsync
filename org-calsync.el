@@ -100,14 +100,17 @@ Example:
   :type '(alist :key-type symbol :value-type plist)
   :group 'org-calsync)
 
-(defun org-calsync-file ()
-  "Absolute path of the aggregated calendar file.
+(defun org-calsync--expand-file (name)
+  "Return NAME expanded under `org-directory'.
 
 Resolved on each call rather than at load: `org-directory' is often set by
 configuration that runs after this package is loaded, and a path captured too
 early is a path pointing at the wrong place for the rest of the session."
-  (expand-file-name org-calsync-file-name
-                    (or (bound-and-true-p org-directory) "~/")))
+  (expand-file-name name (or (bound-and-true-p org-directory) "~/")))
+
+(defun org-calsync-file ()
+  "Absolute path of the aggregated calendar file."
+  (org-calsync--expand-file org-calsync-file-name))
 
 (defun org-calsync--script (name)
   "Return the path of bundled helper script NAME.
@@ -125,13 +128,84 @@ is missing."
     (or (seq-find #'file-exists-p candidates)
         (car candidates))))
 
+(defun org-calsync--read-feed (prompt &optional require-match)
+  "Read a feed name with PROMPT, offering those in `org-calsync-sources'.
+With REQUIRE-MATCH, only a configured feed is accepted."
+  (intern (completing-read
+           prompt
+           (mapcar (lambda (s) (symbol-name (car s))) org-calsync-sources)
+           nil require-match)))
+
 (defun org-calsync-default-directory ()
   "Where an interactive file prompt should start."
   (if (and (bound-and-true-p org-directory) (file-directory-p org-directory))
       org-directory
     default-directory))
 
+;;;; Timestamps
+
+(defun org-calsync--format-timestamp (start end all-day &optional repeater)
+  "Return an Org active timestamp from START to END, both Lisp times.
+
+END is inclusive and may be nil.  With ALL-DAY only the dates are written.
+REPEATER, such as \" +1w\", goes on the start: Org has no way to repeat a
+multi-day all-day range, so one of those is written without it."
+  (let* ((rep (or repeater ""))
+         (date (lambda (time) (format-time-string "%Y-%m-%d %a" time)))
+         (stamp (lambda (time) (format-time-string "%Y-%m-%d %a %H:%M" time)))
+         (same-day (or (null end)
+                       (equal (format-time-string "%Y-%m-%d" start)
+                              (format-time-string "%Y-%m-%d" end)))))
+    (cond
+     ((and all-day same-day)
+      (format "<%s%s>" (funcall date start) rep))
+     (all-day
+      (format "<%s>--<%s>" (funcall date start) (funcall date end)))
+     ((null end)
+      (format "<%s%s>" (funcall stamp start) rep))
+     (same-day
+      (format "<%s-%s%s>" (funcall stamp start)
+              (format-time-string "%H:%M" end) rep))
+     (t
+      (format "<%s%s>--<%s>" (funcall stamp start) rep (funcall stamp end))))))
+
+(defun org-calsync--entry-body-bounds ()
+  "Return (START . END) of the body of the entry at point.
+
+START is after the planning line and drawers; END is the first child heading,
+or the end of the subtree when there is none.  Stopping before the children
+is the point: whatever is read or rewritten as this entry's time must be this
+entry's, never that of a sub-heading somebody wrote under it."
+  (save-excursion
+    (org-back-to-heading t)
+    (let ((subtree-end (save-excursion (org-end-of-subtree t t) (point))))
+      (org-end-of-meta-data t)
+      (let ((start (point)))
+        (cons start
+              (if (re-search-forward org-heading-regexp subtree-end t)
+                  (line-beginning-position)
+                subtree-end))))))
+
 ;;;; Writing an entry
+
+(defun org-calsync--put-owned-properties (f)
+  "Write the properties event plist F owns onto the entry at point.
+
+`:CATEGORY:' and `:LOCATION:' are removed when F has none, so a place taken
+off the invitation is taken off the entry too."
+  (org-entry-put (point) "UID" (plist-get f :uid))
+  ;; Written on every merge, not only on insert: that is what adopts entries
+  ;; imported before feeds existed, so the first sync after an upgrade brings
+  ;; the file under the new bookkeeping without anybody being asked.
+  (when (plist-get f :feed)
+    (org-entry-put (point) org-calsync-feed-property
+                   (symbol-name (plist-get f :feed))))
+  (if (plist-get f :category)
+      (org-entry-put (point) "CATEGORY" (plist-get f :category))
+    (org-entry-delete (point) "CATEGORY"))
+  (if (plist-get f :location)
+      (org-entry-put (point) "LOCATION" (plist-get f :location))
+    (org-entry-delete (point) "LOCATION")))
 
 (defun org-calsync--insert-entry (f)
   "Insert a brand-new entry for event plist F at point.
@@ -146,38 +220,20 @@ entry and a merged one are identical by construction."
   (save-excursion
     (forward-line -2)
     (org-back-to-heading t)
-    (org-entry-put (point) "UID" (plist-get f :uid))
-    (when (plist-get f :feed)
-      (org-entry-put (point) org-calsync-feed-property
-                     (symbol-name (plist-get f :feed))))
-    (when (plist-get f :category)
-      (org-entry-put (point) "CATEGORY" (plist-get f :category)))
-    (when (plist-get f :location)
-      (org-entry-put (point) "LOCATION" (plist-get f :location)))))
+    (org-calsync--put-owned-properties f)))
 
 (defun org-calsync--update-timestamp (ts)
   "Replace this entry's event timestamp with TS, preserving all other content.
 
 Point must be at the heading.  Replaces the first active timestamp or range in
-the entry's own body -- after the planning line and drawers, and stopping
-before any child -- or inserts TS when none is left.
-
-Bounded that tightly on purpose: a search that ran into the children would
-rewrite the time of a sub-heading somebody wrote, which is the one kind of
-damage a calendar mirror must never do."
-  (org-back-to-heading t)
-  (let* ((subtree-end (save-excursion (org-end-of-subtree t t) (point)))
-         (body-start (save-excursion (org-back-to-heading t)
-                                     (org-end-of-meta-data t) (point)))
-         (limit (save-excursion
-                  (goto-char body-start)
-                  (if (re-search-forward org-heading-regexp subtree-end t)
-                      (line-beginning-position)
-                    subtree-end))))
-    (goto-char body-start)
-    (if (re-search-forward org-tsr-regexp limit t)
+the entry's own body, as `org-calsync--entry-body-bounds' delimits it, or
+inserts TS when none is left.  Rewriting a sub-heading's time instead is the
+one kind of damage a calendar mirror must never do."
+  (pcase-let ((`(,start . ,end) (org-calsync--entry-body-bounds)))
+    (goto-char start)
+    (if (re-search-forward org-tsr-regexp end t)
         (replace-match ts t t)
-      (goto-char body-start)
+      (goto-char start)
       (insert ts "\n"))))
 
 (defun org-calsync--merge (f)
@@ -189,19 +245,7 @@ priority, LOGBOOK and clock, SCHEDULED and DEADLINE, body notes, sub-headings."
   (org-back-to-heading t)
   (org-edit-headline (plist-get f :title))
   (org-back-to-heading t)
-  (org-entry-put (point) "UID" (plist-get f :uid))
-  ;; Written on every merge, not only on insert: that is what adopts entries
-  ;; imported before feeds existed, so the first sync after an upgrade brings
-  ;; the file under the new bookkeeping without anybody being asked.
-  (when (plist-get f :feed)
-    (org-entry-put (point) org-calsync-feed-property
-                   (symbol-name (plist-get f :feed))))
-  (if (plist-get f :category)
-      (org-entry-put (point) "CATEGORY" (plist-get f :category))
-    (org-entry-delete (point) "CATEGORY"))
-  (if (plist-get f :location)
-      (org-entry-put (point) "LOCATION" (plist-get f :location))
-    (org-entry-delete (point) "LOCATION"))
+  (org-calsync--put-owned-properties f)
   (org-calsync--update-timestamp (plist-get f :timestamp)))
 
 ;;;; Finding and pruning
@@ -213,17 +257,13 @@ CAL-BUF is searched first because its in-memory state is authoritative during
 an import -- entries added moments ago are not on disk yet.  FILES are the
 other agenda files, searched so that an event refiled out of the calendar into
 a project is updated where it now lives instead of being cloned back."
-  (or (with-current-buffer cal-buf
+  (catch 'found
+    (dolist (place (cons cal-buf files))
+      (with-current-buffer (if (bufferp place) place (find-file-noselect place))
         (org-with-wide-buffer
          (let ((pos (org-find-property "UID" uid)))
-           (and pos (cons cal-buf pos)))))
-      (catch 'found
-        (dolist (file files)
-          (with-current-buffer (find-file-noselect file)
-            (org-with-wide-buffer
-             (let ((pos (org-find-property "UID" uid)))
-               (when pos (throw 'found (cons (current-buffer) pos)))))))
-        nil)))
+           (when pos (throw 'found (cons (current-buffer) pos)))))))
+    nil))
 
 (defun org-calsync--pristine-p ()
   "Non-nil when the entry at point is still an untouched mirror.
@@ -235,19 +275,14 @@ source: a meeting you clocked is a record of your day even after the meeting
 is cancelled."
   (save-excursion
     (org-back-to-heading t)
-    (let ((end (save-excursion (org-end-of-subtree t t) (point))))
+    (pcase-let ((`(,start . ,end) (org-calsync--entry-body-bounds)))
       (and (not (org-get-todo-state))
            (not (org-get-tags nil t))
            (not (save-excursion (org-goto-first-child)))
-           (not (save-excursion
-                  (org-back-to-heading t)
-                  (re-search-forward "^[ \t]*:LOGBOOK:" end t)))
-           (save-excursion
-             (org-back-to-heading t)
-             (org-end-of-meta-data t)
-             (string-match-p
-              (concat "\\`" org-tsr-regexp "\\'")
-              (string-trim (buffer-substring-no-properties (point) end))))))))
+           (not (save-excursion (re-search-forward "^[ \t]*:LOGBOOK:" end t)))
+           (string-match-p
+            (concat "\\`" org-tsr-regexp "\\'")
+            (string-trim (buffer-substring-no-properties start end)))))))
 
 (defun org-calsync--own-property (name)
   "Return NAME as the entry\='s own property drawer writes it, or nil.
@@ -275,9 +310,12 @@ kinds of thing and still own all of them.  An entry with no feed is never
 pruned: it predates this bookkeeping or was written by hand, and either way
 nothing here can claim to know it should be gone.
 
+The entries are remembered by position, not by UID: when two share one, a
+second lookup would find the first, which need not be the one judged pristine.
+
 Returns how many were removed."
   (let ((feed-name (symbol-name feed))
-        stale (removed 0))
+        stale)
     (goto-char (point-min))
     ;; Scope nil = this (widened) buffer only.  The `file' scope would ask
     ;; about agenda files while a brand-new calendar file is still unsaved.
@@ -289,16 +327,14 @@ Returns how many were removed."
                            feed-name)
                     (not (member uid keep-uids))
                     (org-calsync--pristine-p))
-           (push uid stale))))
+           (push (point-marker) stale))))
      nil)
-    (dolist (uid stale)
-      (let ((pos (org-find-property "UID" uid)))
-        (when pos
-          (goto-char pos)
-          (org-back-to-heading t)
-          (delete-region (point) (save-excursion (org-end-of-subtree t t) (point)))
-          (cl-incf removed))))
-    removed))
+    ;; A pristine entry has no children, so no stale entry contains another.
+    (dolist (m stale)
+      (goto-char m)
+      (delete-region (point) (save-excursion (org-end-of-subtree t t) (point)))
+      (set-marker m nil))
+    (length stale)))
 
 ;;;###autoload
 (defun org-calsync-adopt (feed &optional category)
@@ -317,10 +353,7 @@ Interactively, a prefix argument asks for it.
 Adoption only says who owns them; the next sync still refuses to remove any
 entry you have clocked, tagged, or written under."
   (interactive
-   (list (intern (completing-read
-                  "Adopt into feed: "
-                  (mapcar (lambda (s) (symbol-name (car s))) org-calsync-sources)
-                  nil nil))
+   (list (org-calsync--read-feed "Adopt into feed: ")
          (when current-prefix-arg
            (read-string "Only entries whose CATEGORY is: "))))
   (let ((buf (find-file-noselect (org-calsync-file)))
@@ -428,11 +461,7 @@ one."
   (let* ((feed (or feed
                    (if (= 1 (length org-calsync-sources))
                        (caar org-calsync-sources)
-                     (intern (completing-read
-                              "Feed: "
-                              (mapcar (lambda (s) (symbol-name (car s)))
-                                      org-calsync-sources)
-                              nil t)))))
+                     (org-calsync--read-feed "Feed: " t))))
          (spec (cdr (assq feed org-calsync-sources)))
          (fetch (plist-get spec :fetch)))
     (unless spec (user-error "No such feed: %s" feed))

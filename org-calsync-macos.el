@@ -195,27 +195,10 @@ An all-day event's end comes back as the last day itself, not the exclusive
 next one that ics uses, so nothing is taken off it here.  Getting this
 backwards is how an imported calendar ends up a day long everywhere, which is
 why it is said out loud in both readers."
-  (let* ((start (encode-time 0 (nth 4 from) (nth 3 from)
-                             (nth 2 from) (nth 1 from) (nth 0 from)))
-         (end (encode-time 0 (nth 4 to) (nth 3 to)
-                           (nth 2 to) (nth 1 to) (nth 0 to)))
-         (same-day (equal (format-time-string "%Y-%m-%d" start)
-                          (format-time-string "%Y-%m-%d" end))))
-    (cond
-     (all-day
-      (if same-day
-          (format "<%s>" (format-time-string "%Y-%m-%d %a" start))
-        (format "<%s>--<%s>"
-                (format-time-string "%Y-%m-%d %a" start)
-                (format-time-string "%Y-%m-%d %a" end))))
-     (same-day
-      (format "<%s-%s>"
-              (format-time-string "%Y-%m-%d %a %H:%M" start)
-              (format-time-string "%H:%M" end)))
-     (t
-      (format "<%s>--<%s>"
-              (format-time-string "%Y-%m-%d %a %H:%M" start)
-              (format-time-string "%Y-%m-%d %a %H:%M" end))))))
+  (cl-flet ((encode (ymdhm)
+              (pcase-let ((`(,y ,mo ,d ,h ,mi) ymdhm))
+                (encode-time 0 mi h d mo y))))
+    (org-calsync--format-timestamp (encode from) (encode to) all-day)))
 
 ;;;###autoload
 (defun org-calsync-macos-fetch ()

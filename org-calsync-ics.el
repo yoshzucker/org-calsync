@@ -57,32 +57,12 @@ calendar ends up one day long everywhere."
   (let* ((all-day (or (member "DATE" attrs)
                       (not (string-match-p "T" dtstart))))
          (start (encode-time (icalendar--decode-isodatetime dtstart)))
-         (end (and dtend (encode-time (icalendar--decode-isodatetime dtend))))
-         (rep (or (org-calsync-ics--rrule->repeater rrule) "")))
-    (if all-day
-        (let* ((incl-end (and end (time-subtract end 86400)))
-               (start-day (format-time-string "%Y-%m-%d" start))
-               (end-day (and incl-end (format-time-string "%Y-%m-%d" incl-end))))
-          (if (and end-day (not (string= start-day end-day)))
-              (format "<%s>--<%s>"
-                      (format-time-string "%Y-%m-%d %a" start)
-                      (format-time-string "%Y-%m-%d %a" incl-end))
-            (format "<%s%s>" (format-time-string "%Y-%m-%d %a" start) rep)))
-      (let ((start-day (format-time-string "%Y-%m-%d" start))
-            (end-day (and end (format-time-string "%Y-%m-%d" end))))
-        (cond
-         ((null end)
-          (format "<%s%s>" (format-time-string "%Y-%m-%d %a %H:%M" start) rep))
-         ((string= start-day end-day)
-          (format "<%s-%s%s>"
-                  (format-time-string "%Y-%m-%d %a %H:%M" start)
-                  (format-time-string "%H:%M" end)
-                  rep))
-         (t
-          (format "<%s%s>--<%s>"
-                  (format-time-string "%Y-%m-%d %a %H:%M" start)
-                  rep
-                  (format-time-string "%Y-%m-%d %a %H:%M" end))))))))
+         (end (and dtend (encode-time (icalendar--decode-isodatetime dtend)))))
+    (org-calsync--format-timestamp
+     start
+     (if (and all-day end) (time-subtract end 86400) end)
+     all-day
+     (org-calsync-ics--rrule->repeater rrule))))
 
 (defun org-calsync-ics--event (event category)
   "Return the `org-calsync' event plist for ical EVENT, or nil when undated.

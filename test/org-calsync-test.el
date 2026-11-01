@@ -247,6 +247,26 @@ cancelled, which is a record of your day being deleted to tidy a mirror."
       (should-not (string-match-p "Cancelled" text))
       (should (string-match-p "Attended" text)))))
 
+(ert-deftest org-calsync-test-prune-removes-the-entry-it-judged ()
+  "With two entries sharing a UID, the untouched one goes, not the first one.
+
+Duplicates happen -- a refile interrupted halfway, a copy pasted by hand --
+and the entry judged pristine must be the entry deleted.  Looking the UID up
+again afterwards finds whichever comes first, which may be the clocked one."
+  (org-calsync-test--with-dir
+    (with-temp-file (org-calsync-file)
+      (insert "* Attended\n:PROPERTIES:\n:UID: dup\n:FEED: work\n:END:\n"
+              ":LOGBOOK:\n"
+              "CLOCK: [2026-08-10 Mon 11:00]--[2026-08-10 Mon 11:30] =>  0:30\n"
+              ":END:\n"
+              "<2026-08-10 Mon 11:00>\n"
+              "* Mirror copy\n:PROPERTIES:\n:UID: dup\n:FEED: work\n:END:\n"
+              "<2026-08-10 Mon 11:00>\n"))
+    (org-calsync-apply nil 'work t)
+    (let ((text (org-calsync-test--calendar)))
+      (should (string-match-p "Attended" text))
+      (should-not (string-match-p "Mirror copy" text)))))
+
 (ert-deftest org-calsync-test-feed-prunes-across-categories ()
   "One source may import several kinds of thing and still own all of them.
 
@@ -542,6 +562,22 @@ against the file itself rather than against the function that built it."
         (dolist (leak '("Acme" "contract" "negotiation" "room 12"
                         "private note" "LOCATION" "DESCRIPTION"))
           (should-not (string-match-p (regexp-quote leak) text)))))))
+
+(ert-deftest org-calsync-test-busy-export-reads-only-the-entry-itself ()
+  "A child's time is exported once, under the child, never under its parent.
+
+A parent with no time of its own is not an event; reading into its children
+would export the child's time under the parent's UID as well."
+  (org-calsync-test--with-dir
+    (let ((org-calsync-busy-days 3650))
+      (with-temp-file (org-calsync-file)
+        (insert "* Project\n:PROPERTIES:\n:UID: parent\n:END:\n"
+                "** Kickoff\n:PROPERTIES:\n:UID: child\n:END:\n"
+                (format "<%s 14:00-15:00>\n" (org-calsync-test--soon))))
+      (let* ((out (org-calsync-export-busy))
+             (text (with-temp-buffer (insert-file-contents out) (buffer-string))))
+        (should (string-match-p "UID:child" text))
+        (should-not (string-match-p "UID:parent" text))))))
 
 (ert-deftest org-calsync-test-busy-export-skips-excluded-categories ()
   "Categories the receiving device already has are left out."

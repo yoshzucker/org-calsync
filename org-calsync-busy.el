@@ -58,8 +58,7 @@ Nil just reports the path."
 
 (defun org-calsync-busy-file ()
   "Absolute path of the abstracted busy ics."
-  (expand-file-name org-calsync-busy-file-name
-                    (or (bound-and-true-p org-directory) "~/")))
+  (org-calsync--expand-file org-calsync-busy-file-name))
 
 (defun org-calsync-busy--rrule (ts)
   "Return an ical RRULE line for Org timestamp TS's repeater, or nil."
@@ -99,11 +98,10 @@ you are busy, and inventing a length would be saying something else."
                      (format "%04d%02d%02dT%02d%02d00" ys ms ds hs (or mns 0)))))))
 
 (defun org-calsync-busy--entry-timestamp ()
-  "Parse the entry's first active timestamp, or nil.  Point at the heading."
+  "Parse the first active timestamp in the entry's own body, or nil."
   (save-excursion
-    (org-back-to-heading t)
-    (let ((end (save-excursion (org-end-of-subtree t t) (point))))
-      (org-end-of-meta-data t)
+    (pcase-let ((`(,start . ,end) (org-calsync--entry-body-bounds)))
+      (goto-char start)
       (when (re-search-forward org-tsr-regexp end t)
         (org-timestamp-from-string (match-string 0))))))
 
